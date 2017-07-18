@@ -1,0 +1,206 @@
+FROM ubuntu:14.04
+
+#Ray Burgemeestre
+MAINTAINER Thomas Herbin
+
+
+ENV DEBIAN_FRONTEND noninteractive
+# V1
+
+ARG nagvis=nagvis-1.8.5
+ARG nagios=nagios-4.1.1
+ARG nagiosplugins=nagios-plugins-2.1.1
+ARG nagiosgraphversion=1.5.2
+ARG livestatusversion=1.2.6p16
+
+RUN apt-get update && \
+    ### apache and php and other prerequisites \
+    #apt-get install -y build-essential libgd2-xpm-dev openssl libssl-dev xinetd apache2-utils unzip
+    apt-get install -y apache2 php5 php5-gd php5-sqlite apache2-utils && \
+    apt-get install -y rsync nano wget telnet make unzip && \
+    ### nagios plugins ssl support \
+    apt-get install -y openssl libssl-dev && \
+    \
+    ### nagiosgraph dependencies.. \
+    apt-get install -y libcgi-pm-perl librrds-perl libgd-gd2-perl libnagios-object-perl && \
+    \
+    apt-get install -y aptitude && \
+    ### enable apache modules.. \
+    a2enmod rewrite && \
+    a2enmod cgi && \
+    \
+    ### add nagios (and www-data) user and make them part of nagioscmd group \
+    useradd -ms /bin/bash nagios && \
+    groupadd nagcmd && \
+    usermod -a -G nagcmd nagios && \
+    usermod -a -G nagcmd www-data
+
+WORKDIR /usr/local/src
+RUN wget http://www.nagvis.org/share/${nagvis}.tar.gz && \
+    wget https://assets.nagios.com/downloads/nagioscore/releases/${nagios}.tar.gz && \
+    wget http://nagios-plugins.org/download/${nagiosplugins}.tar.gz && \
+    wget http://downloads.sourceforge.net/project/nagiosgraph/nagiosgraph/${nagiosgraphversion}/nagiosgraph-${nagiosgraphversion}.tar.gz && \
+    wget https://mathias-kettner.de/support/${livestatusversion}/check-mk-raw-${livestatusversion}.cre.tar.gz && \
+    tar -zxvf check-mk-raw-${livestatusversion}.cre.tar.gz && \
+    tar -zxvf ${nagios}.tar.gz && \
+    tar -zxvf ${nagvis}.tar.gz && \
+    tar -zxvf ${nagiosplugins}.tar.gz && \
+    tar -zxvf nagiosgraph-${nagiosgraphversion}.tar.gz
+
+WORKDIR /usr/local/src/${nagios}
+RUN ./configure --with-command-group=nagcmd && \
+    make all && \
+    make install && \
+    make install-init && \
+    make install-config && \
+    make install-commandmode && \
+    /usr/bin/install -c -m 644 sample-config/httpd.conf /etc/apache2/sites-enabled/nagios.conf && \
+    echo -n admin | htpasswd -i -c /usr/local/nagios/etc/htpasswd.users nagiosadmin
+
+WORKDIR /usr/local/src/check-mk-raw-${livestatusversion}.cre
+RUN ./configure --with-nagios4 && \
+    make && \
+    ### specifically make mk-livestatus package /again/ with the --with-nagios4 flag, by default it's build for nagios3 which doesn't work.. \
+    cd ./packages/mk-livestatus/mk-livestatus-${livestatusversion} && \
+    make clean && \
+    ./configure --with-nagios4 && \
+    make && \
+    make install
+
+WORKDIR /usr/local/src/${nagiosplugins}
+RUN ./configure --with-nagios-user=nagios --with-nagios-group=nagios --with-openssl && \
+    make && \
+    make install
+
+WORKDIR /usr/local/src/${nagvis}
+RUN \
+    ### update nagios config.. \
+    printf "%s\n" "broker_module=/usr/local/lib/mk-livestatus/livestatus.o /usr/local/nagios/var/rw/live" \
+    	    "process_performance_data=1"								  \
+	    "service_perfdata_file=/usr/local/nagios/var/perfdata.log"					  \
+    	    "service_perfdata_file_template=\$LASTSERVICECHECK\$||\$HOSTNAME\$||\$SERVICEDESC\$||\$SERVICEOUTPUT\$||\$SERVICEPERFDATA\$" \
+     	    "service_perfdata_file_mode=a"												 \
+     	    "service_perfdata_file_processing_interval=30"										 \
+     	    "service_perfdata_file_processing_command=process-service-perfdata"								 \
+    >> /usr/local/nagios/etc/nagios.cfg && \
+    ### call installation script \
+    ./install.sh -n /usr/local/nagios -p /usr/local/nagvis -l "unix:/usr/local/nagios/var/rw/live" -b mklivestatus -u www-data -g www-data -w /etc/apache2/conf-enabled -a y -F -q && ls &&\
+
+### fix nagvis apache vhost \
+    printf "%s\n" "<Directory \"/usr/local/nagvis/share\">" \
+    	   	  "  Require all granted"\
+		  "</Directory>"\
+   >> /etc/apache2/conf-enabled/nagvis.conf
+
+WORKDIR /usr/local/src/nagiosgraph-${nagiosgraphversion}
+RUN ./install.pl --check-prereq && \
+    NG_PREFIX=/usr/local/nagiosgraph NG_WWW_DIR=/usr/local/nagios/share ./install.pl --prefix=/usr/local/nagiosgraph && \
+    \
+    ### fix nagiosgraph vhost \
+    cp -prv /usr/local/nagiosgraph/etc/nagiosgraph-apache.conf /etc/apache2/sites-enabled/ && \
+    printf "%s\n" "<Directory \"/usr/local/nagiosgraph/cgi/\">" \
+    	      	  "  Require all granted" 			\
+    		  "</Directory>"				\
+    >> /etc/apache2/sites-enabled/nagiosgraph-apache.conf
+    
+    ### define a graphed-service service template \
+    printf "%s\n" "define service {" \
+     	   "    name graphed-service" \
+     	   "    action_url /nagiosgraph/cgi-bin/show.cgi?host=\$HOSTNAME\$&service=\$SERVICEDESC\$' onMouseOver='showGraphPopup(this)' onMouseOut='hideGraphPopup()' rel='/nagiosgraph/cgi-bin/showgraph.cgi?host=\$HOSTNAME\$&service=\$SERVICEDESC\$&period=week&rrdopts=-w+450+-j" \
+     	   "    register 0"	\								    									    
+     	   "}"			\
+    >>/usr/local/nagios/etc/objects/templates.cfg && \
+    
+
+    ### for demo enable the graphed-service on all the services in localhost.cfg \
+
+    sed -i 's/local-service/local-service,graphed-service/' /usr/local/nagios/etc/objects/localhost.cfg && \ 
+    ### fix the perfdata log location in nagiosgraph.conf \
+    sed -i 's/\/tmp\/perfdata.log/\/usr\/local\/nagios\/var\/perfdata.log/' /usr/local/nagiosgraph/etc/nagiosgraph.conf
+    	   								   
+    ### replace the process-service-perfdata command (renames the old one to *-old, which is an artifact from the install.sh script run previously) \
+    sed -i 's/process-service-perfdata/process-service-perfdata-old/' /usr/local/nagios/etc/objects/commands.cfg && \
+
+
+	       "   command_name  process-service-perfdata"		\
+     	       "   command_line  /usr/local/nagiosgraph/bin/insert.pl"	\
+     	       "}"							\
+	>> /usr/local/nagios/etc/objects/commands.cfg
+
+
+
+	### FOR NRPE ####
+	printf "%s\n" "define command {"				\
+	       	      "        command_name check_nrpe"			\
+		      "        command_line $USER1$/check_nrpe -H $HOSTADDRESS$ -c $ARG1$" \
+		      "}" \
+	>> /usr/local/nagios/etc/objects/commands.cfg
+
+
+
+
+RUN \
+    ### create a script that starts both apache and the nagios process \
+    ### TODO: replace this with something better \
+    ### remplacer avec service start 
+    echo "/usr/sbin/apache2ctl start"                                     > /usr/bin/start-apache-and-nagios.sh &&\
+    echo "/usr/local/nagios/bin/nagios /usr/local/nagios/etc/nagios.cfg" >> /usr/bin/start-apache-and-nagios.sh
+
+# V2
+
+ADD provisioning/nagios-ssh                         /home/nagios/.ssh
+ADD provisioning/system-scripts/slack_notification  /usr/bin/slack_notification
+ADD provisioning/system-scripts/slack_nagios.pl     /usr/bin/slack_nagios.pl
+COPY provisioning/nagios-config                      /usr/local/nagios/etc
+COPY provisioning/nagvis-config                      /usr/local/nagvis/etc
+ADD provisioning/nagios-plugins                     /usr/local/nagios/libexec-custom
+ADD provisioning/index.php                          /var/www/html/index.php
+
+#RUN rm -rf /usr/local/nagios/etc/resource.cfg && \
+#   ln -s /etc/sensitive-data/resource.cfg /usr/local/nagios/etc/resource.cfg && \
+
+## du coup c'est link au démarrage du container
+RUN    ln -s /etc/sensitive-data/nagios.id_rsa /home/nagios/.ssh/nagios.id_rsa && \
+    apt-get install -y screen ksh redis-tools libredis-perl && \
+    chown -h nagios.nagios /home/nagios/.ssh/* && \
+    (chmod 700 /home/nagios/.ssh/* || true) && \
+
+    chmod +x /usr/bin/slack_* && \
+    # set correct permissions inside nagios configuration dir \
+    chmod 775 /usr/local/nagios/etc -R && \
+    chown nagios.nagios /usr/local/nagios/etc -R
+
+RUN chown www-data:www-data /usr/local/nagvis -R
+    #	&& \
+    #chmod 664 /usr/local/nagvis/etc/nagvis.ini.php	&& \
+    #chmod 775 /usr/local/nagvis/nagvis/images/maps	&& \
+    #chmod 664 /usr/local/nagvis/nagvis/images/maps/*	&& \
+    #chmod 775 /usr/local/nagvis/etc/maps		&& \
+    #chmod 664 /usr/local/nagvis/etc/maps/*		&& \
+    #chmod 775 /usr/local/nagvis/var			&& \
+    #chmod 664 /usr/local/nagvis/var/*
+
+
+#RUN     rm /bin/sh && ln -s /bin/bash /bin/sh && locale-gen en_US.UTF-8
+#ENV     LC_ALL="en_US.UTF-8"
+
+
+RUN /bin/echo -e "salt\n\
+    	      salut  \
+truc"
+
+RUN printf "%s\n" "truc" \
+    "line one"    "machie" \
+"line 2" \
+"stophere" \
+
+
+#RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+#RUN rm -rf /usr/local/src/*
+
+
+
+
+EXPOSE 80
+
+ENTRYPOINT ["/bin/bash", "/usr/bin/start-apache-and-nagios.sh"]
