@@ -49,7 +49,7 @@ http://your_server_ip/nagvis
 
 The docker container keeps running thanks to supervisor, that starts apache2, nagios and xinetd (for NRPE) 
 
-## Contributors
+## Error, problems etc ....
 
 If you think I've done something stupid, well ... tell me, use the issue tracker, make a pull request etc ...
 
