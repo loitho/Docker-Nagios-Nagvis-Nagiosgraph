@@ -20,9 +20,15 @@ I modified it and improved it in order to have the lastest versions of nagios / 
 
 ## Installation
 
-to install and run the image simply docker pull it : 
-* docker run docker run -d -p 80:80 loitho/nag-ios-vis-graph
+### Automatically from docker hub:
+to installthe image from the docker hub simply docker run it and it'll get pull automatically : 
+* docker run -d -p 80:80 loitho/nag-ios-vis-graph
 
+### Manually from the source code:
+You can build the whole docker image from the git folder, simply clone the repository and run the shell script :
+* ./run.sh *
+
+### Side note 
 if you want to acces the container and add host / modify the configuration run the image 
 * docker exec -it *your container* bash
 
