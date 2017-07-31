@@ -26,7 +26,7 @@ to installthe image from the docker hub simply docker run it and it'll get pull 
 
 ### Manually from the source code:
 You can build the whole docker image from the git folder, simply clone the repository and run the shell script :
-* ./run.sh *
+* ./run.sh 
 
 ### Side note 
 if you want to acces the container and add host / modify the configuration run the image 
